@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Home</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#191919;background:#f7f7f7}
+*{box-sizing:border-box}
+body{margin:0}
+main{max-width:480px;margin:auto;background:white;padding:24px;min-height:100vh}
+header,.device,.row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+header{margin-bottom:30px}
+button,input{font:inherit}
+button{cursor:pointer}
+button:disabled{opacity:.43;cursor:default}
+button:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid #286852;outline-offset:3px}
+small,#activity,.helper{color:#555}
+h1{margin:.25em 0;font-size:1.7rem;letter-spacing:-.045em}
+h2{font-size:1.05rem;margin:25px 0 11px}
+.room{width:fit-content;margin:26px 0 29px;padding:10px;border:1px solid;border-radius:12px}
+.room,.primary{background:#1e1e1e;color:#fff;border-color:#1e1e1e}
+.device{border:1px solid #e6e6e6;border-radius:16px;padding:16px}
+.device p{margin:5px 0 0}
+#activity{min-height:1.2em;font-size:.85rem}
+#toggle{width:53px;height:31px;padding:3px;border:0;border-radius:20px;background:#ddd;flex-shrink:0}
+#toggle span{display:block;width:25px;height:25px;background:white;border-radius:50%;transition:transform .15s}
+#toggle[aria-checked="true"]{background:#202020}
+#toggle[aria-checked="true"] span{transform:translateX(22px)}
+details{margin-top:25px;padding-top:15px;border-top:1px solid #eee}
+summary{cursor:pointer;font-weight:650}
+dl{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.88rem;background:#f6f6f6;border-radius:12px;padding:12px}
+dd{margin:0;text-align:right;font-weight:650}
+label{display:block;font-size:.88rem;margin:15px 0 7px}
+input,.btn{border:1px solid #d0d0d0;border-radius:10px;padding:9px 12px}
+input{flex:1;min-width:0}
+.helper{font-size:.8rem;line-height:1.5}
+</style>
+</head>
+<body>
+<main>
+<header><button id="menu" class="btn" aria-label="Open Gateway settings">☰</button><small id="connection">Connecting…</small></header>
+<h1>Hi there!</h1><small>Welcome to your Smart Home</small>
+<p class="room">Living Room</p>
+<h2>Devices</h2>
+<div class="device"><div><strong>Smart light</strong><p id="state"><small>Awaiting a relay response</small></p></div>
+<button id="toggle" role="switch" aria-checked="false" aria-label="Smart light" disabled><span></span></button></div>
+<p id="activity" role="status">Connecting to gateway…</p>
+<details id="settings">
+<summary>Gateway settings</summary>
+<dl><dt>Gateway unicast</dt><dd id="own">—</dd><dt>Client AppKey</dt><dd id="key">—</dd><dt>Switch unicast</dt><dd id="target">—</dd></dl>
+<form id="target-form">
+<label for="address">Switch unicast address (hex)</label>
+<div class="row"><input id="address" name="addr" required maxlength="6" autocomplete="off" placeholder="e.g. 0004"><button class="btn primary" id="save" type="submit">Save</button></div>
+</form>
+<p class="helper">Use SMART_SWITCH’s current primary unicast address from nRF Mesh.</p>
+<div class="row"><button class="btn primary" id="on" disabled>Turn ON</button><button class="btn" id="off" disabled>Turn OFF</button></div>
+</details>
+</main>
+<script>
+const el = id => document.getElementById(id);
+const controls = ['toggle', 'on', 'off'];
+let status = null;
+let refreshing = null;
+let refreshTimer;
+let busy = false;
+let message = '';
+let connectionError = '';
+
+function render() {
+  const phase = status?.phase;
+  const known = status?.relay === 0 || status?.relay === 1;
+  const ready = status && status.blocked === '';
+  for (const id of controls) el(id).disabled = !ready || busy || phase === 'pending';
+  el('save').disabled = busy || phase === 'pending';
+  el('toggle').setAttribute('aria-checked', String(known && status.relay === 1));
+  el('state').textContent = known ? 'Relay: ' + (status.relay ? 'ON' : 'OFF')
+    : status?.reading ? 'Reading relay state…' : 'Relay state unknown';
+  const messages = {
+    pending: 'Waiting for relay response…',
+    ack: 'Switch acknowledged the command.',
+    timeout: 'No response. Check switch power, its address, and the AppKey on both models.',
+    failed: 'Mesh command failed. Check the gateway Serial Monitor.'
+  };
+  el('activity').textContent = connectionError || message || status?.blocked ||
+    messages[phase] || (ready ? 'Ready to control the relay.' : 'Connecting to gateway…');
+}
+
+async function request(path, form) {
+  const timer = new AbortController();
+  const expires = setTimeout(() => timer.abort(), 4000);
+  try {
+    const options = {cache: 'no-store', signal: timer.signal};
+    if (form) {
+      options.method = 'POST';
+      options.body = new URLSearchParams(form);
+    }
+    const response = await fetch(path, options);
+    const body = await response.json().catch(() => null);
+    if (!response.ok || !body) {
+      throw new Error(body?.message || 'Gateway API returned HTTP ' + response.status + '.');
+    }
+    return body;
+  } finally {
+    clearTimeout(expires);
+  }
+}
+
+function refresh() {
+  if (!refreshing) {
+    clearTimeout(refreshTimer);
+    refreshing = (async () => {
+      try {
+        const next = await request('/api/status');
+        if (typeof next.blocked !== 'string') {
+          throw new Error('Firmware and page versions differ. Reload the gateway address.');
+        }
+        status = next;
+        connectionError = '';
+        el('connection').textContent = 'Online';
+        el('own').textContent = status.gateway === '0000' ? 'Unprovisioned' : '0x' + status.gateway;
+        el('key').textContent = status.bound ? 'Bound' : 'Not bound';
+        el('target').textContent = status.target === '0000' ? 'Not set' : '0x' + status.target;
+        if (!el('address').value && status.target !== '0000') el('address').value = status.target;
+      } catch (err) {
+        status = null;
+        el('connection').textContent = 'Offline';
+        connectionError = err.message.startsWith('Firmware and page')
+          ? err.message
+          : 'Cannot reach the gateway status. Use the current http:// address from Serial Monitor on the same Wi-Fi.';
+      } finally {
+        refreshing = null;
+        render();
+        const waiting = status?.phase === 'pending' || status?.reading;
+        refreshTimer = setTimeout(() => { if (!busy) refresh(); }, waiting ? 100 : 2000);
+      }
+    })();
+  }
+  return refreshing;
+}
+
+async function submit(path, form) {
+  if (busy) return;
+  busy = true;
+  message = '';
+  render();
+  try {
+    await request(path, form);
+  } catch (err) {
+    message = err.name === 'AbortError' ? 'Gateway request timed out. Try again.' : err.message;
+  } finally {
+    await refreshing;
+    await refresh();
+    busy = false;
+    render();
+  }
+}
+
+function command(on) {
+  if (!status || status.blocked || status.phase === 'pending') return;
+  return submit('/api/switch', {state: on ? 'on' : 'off'});
+}
+el('menu').onclick=()=>{el('settings').open=!el('settings').open;};
+el('toggle').onclick=()=>command(el('toggle').getAttribute('aria-checked')!=='true');
+el('on').onclick=()=>command(true);
+el('off').onclick=()=>command(false);
+el('target-form').onsubmit = event => {
+  event.preventDefault();
+  return submit('/api/target', {addr: el('address').value.trim()});
+};
+refresh();
+</script>
+</body>
+</html>

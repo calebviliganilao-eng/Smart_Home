@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.esp32s3
+wifi_secrets.h
